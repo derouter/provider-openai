@@ -1,3 +1,5 @@
+import * as bignumber from "@ethersproject/bignumber";
+
 /**
  * Would panic upon non-exhaustive-ness.
  * @example default: unreachable(case)
@@ -39,4 +41,25 @@ export class Deferred<T> {
   reject(reason: any): void {
     this._reject(reason);
   }
+}
+
+/**
+ * @example parseEther("1.0") === BigNumber.from("1000000000000000000")
+ */
+export function parseEther(value: string): bignumber.BigNumber {
+  return bignumber.parseFixed(value, 18);
+}
+
+/**
+ * @example formatEther(BigNumber.from("1000000000000000000")) === "1.0"
+ */
+export function formatEther(value: bignumber.BigNumber): string {
+  return bignumber.formatFixed(value, 18);
+}
+
+/**
+ * @example parseWeiToEth("1000000000000000000") === 1.0
+ */
+export function parseWeiToEth(value: string): number {
+  return parseFloat(formatEther(bignumber.BigNumber.from(value)));
 }

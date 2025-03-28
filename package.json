@@ -34,7 +34,11 @@
     "typescript": "^5.8.2"
   },
   "dependencies": {
+    "@derouter/protocol-openai": "file:../protocol-openai",
     "@derouter/provider": "file:../provider",
-    "json5": "^2.2.3"
+    "@ethersproject/bignumber": "^5.8.0",
+    "json5": "^2.2.3",
+    "openai": "^4.89.1",
+    "valibot": "^1.0.0"
   }
 }
