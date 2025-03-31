@@ -1,5 +1,15 @@
 import * as bignumber from "@ethersproject/bignumber";
 
+export const pick = <T extends {}, K extends keyof T>(obj: T, keys: Array<K>) =>
+  Object.fromEntries(
+    keys.filter((key) => key in obj).map((key) => [key, obj[key]])
+  ) as Pick<T, K>;
+
+export const omit = <T extends {}, K extends keyof T>(obj: T, keys: Array<K>) =>
+  Object.fromEntries(
+    Object.entries(obj).filter(([key]) => !keys.includes(key as K))
+  ) as Omit<T, K>;
+
 /**
  * Would panic upon non-exhaustive-ness.
  * @example default: unreachable(case)

@@ -1,4 +1,4 @@
-import * as openaiProtocol from "@derouter/protocol-openai";
+import * as openai from "@derouter/protocol-openai";
 import { Provider } from "@derouter/provider";
 import { readCborOnce, writeCbor } from "@derouter/provider/util";
 import json5 from "json5";
@@ -8,7 +8,26 @@ import { parseArgs } from "node:util";
 import OpenAI from "openai";
 import { Duplex } from "stream";
 import * as v from "valibot";
-import { parseEther, parseWeiToEth } from "./lib/util.js";
+import { parseEther, parseWeiToEth, pick } from "./lib/util.js";
+
+enum FailureReason {
+  UnhandledError,
+
+  /**
+   * Request body contents violate the OpenAI protocol.
+   */
+  ProtocolRequestBody,
+
+  /**
+   * Model ID mismatches the offer's.
+   */
+  ProtocolModelId,
+
+  /**
+   * We've encountered an OpenAI service error.
+   */
+  OpenAIError,
+}
 
 const PriceSchema = v.object({
   $pol: v.pipe(
@@ -69,24 +88,29 @@ if (!configParseResult.success) {
 const config = configParseResult.output;
 console.dir(config, { depth: null, colors: true });
 
-class OpenAiProxyProvider extends Provider<openaiProtocol.OfferPayload> {
+class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
   async onConnection(
     customerPeerId: string,
     offer: {
       protocolId: string;
       offerId: string;
-      protocolPayload: openaiProtocol.OfferPayload;
+      protocolPayload: openai.OfferPayload;
     },
     connectionId: number,
     stream: Duplex
   ): Promise<void> {
     console.debug("onConnection", { customerPeerId, offer, connectionId });
 
+    const openAiClient = new OpenAI({
+      baseURL: config.openai_base_url,
+      apiKey: config.openai_api_key ?? "",
+    });
+
     connectionLoop: while (true) {
       console.debug("Waiting for a request...");
+
       const request = await readCborOnce<
-        | openaiProtocol.CompletionsRequestBody
-        | openaiProtocol.ChatCompletionRequestBody
+        openai.completions.RequestBody | openai.chatCompletions.RequestBody
       >(stream);
 
       if (!request) {
@@ -94,332 +118,330 @@ class OpenAiProxyProvider extends Provider<openaiProtocol.OfferPayload> {
         break connectionLoop;
       }
 
-      const jobId = "42";
+      const { database_job_id, provider_job_id, created_at_sync } =
+        await this.createJob({
+          connection_id: connectionId,
+          private_payload: JSON.stringify({ request }),
+        });
 
-      if ("prompt" in request) {
-        const bodyParseResult = v.safeParse(
-          openaiProtocol.completions.RequestBodySchema,
-          request
+      const bodyParseResult = v.safeParse(
+        "prompt" in request
+          ? openai.completions.RequestBodySchema
+          : openai.chatCompletions.RequestBodySchema,
+        request
+      );
+
+      if (!bodyParseResult.success) {
+        console.warn(
+          "Invalid OpenAI Request Body",
+          v.flatten(bodyParseResult.issues)
         );
 
-        if (!bodyParseResult.success) {
-          console.warn(
-            "Invalid OpenAI Request Body",
-            v.flatten(bodyParseResult.issues)
-          );
+        await this.failJob({
+          database_job_id: database_job_id,
+          reason: JSON.stringify(v.flatten(bodyParseResult.issues)),
+          reason_class: FailureReason.ProtocolRequestBody,
+        });
 
-          await writeCbor(stream, {
-            status: "ProtocolViolation",
-            message: "Invalid OpenAI Request Body",
-          } satisfies openaiProtocol.ResponsePrologue);
+        await writeCbor(stream, {
+          status: "ProtocolViolation",
+          message: "Invalid OpenAI Request Body",
+        } satisfies openai.ResponsePrologue);
 
-          break connectionLoop;
-        }
+        break connectionLoop;
+      }
 
-        const body = bodyParseResult.output;
+      const body = bodyParseResult.output;
 
-        if (body.model !== offer.protocolPayload.model_id) {
-          console.warn("Model ID Mismatch", {
+      if (body.model !== offer.protocolPayload.model_id) {
+        console.warn("Model ID Mismatch", {
+          expected: offer.protocolPayload.model_id,
+          received: body.model,
+        });
+
+        await this.failJob({
+          database_job_id: database_job_id,
+          reason: JSON.stringify({
             expected: offer.protocolPayload.model_id,
             received: body.model,
+          }),
+          reason_class: FailureReason.ProtocolModelId,
+        });
+
+        await writeCbor(stream, {
+          status: "ProtocolViolation",
+          message: "Model ID Mismatch",
+        } satisfies openai.ResponsePrologue);
+
+        break connectionLoop;
+      }
+
+      if (body.stream) {
+        let response;
+
+        try {
+          console.debug("Making OpenAI request...", {
+            ...body,
+            stream: true,
+            stream_options: {
+              include_usage: true,
+            },
+          });
+
+          response =
+            "prompt" in body
+              ? await openAiClient.completions.create({
+                  ...body,
+                  stream: true,
+                  stream_options: {
+                    include_usage: true,
+                  },
+                })
+              : await openAiClient.chat.completions.create({
+                  ...body,
+                  stream: true,
+                  stream_options: {
+                    include_usage: true,
+                  },
+                });
+        } catch (e: any) {
+          console.error("OpenAI error", e);
+
+          await this.failJob({
+            database_job_id: database_job_id,
+            reason: e.message,
+            reason_class: FailureReason.OpenAIError,
           });
 
           await writeCbor(stream, {
-            status: "ProtocolViolation",
-            message: "Model ID Mismatch",
-          } satisfies openaiProtocol.ResponsePrologue);
+            status: "ServiceError",
+            message: "Internal Server Error",
+          } satisfies openai.ResponsePrologue);
 
-          break connectionLoop;
+          continue connectionLoop;
         }
 
-        if (body.stream) {
-          let response;
+        const prologue: openai.ResponsePrologue = {
+          status: "Ok",
+          provider_job_id,
+          created_at_sync,
+        };
 
-          try {
-            console.debug("Making an OpenAI request...");
+        console.debug("Writing prologue...", prologue);
+        await writeCbor(stream, prologue);
 
-            response = await new OpenAI({
-              baseURL: config.openai_base_url,
-              apiKey: config.openai_api_key ?? "",
-            }).completions.create({
-              ...body,
-              stream: true,
-              stream_options: {
-                include_usage: true,
-              },
-            });
-          } catch (e: any) {
-            console.error("Unhandled OpenAI error", e);
+        let usage;
+        const chunks = [];
 
-            await writeCbor(stream, {
-              status: "ServiceError",
-              message: "Internal Server Error",
-            } satisfies openaiProtocol.ResponsePrologue);
+        // BUG: OpenAI may fail during the stream.
+        for await (const chunk of response) {
+          chunks.push(chunk);
+          if (chunk.usage) usage = chunk.usage;
 
-            continue connectionLoop;
-          }
-
-          const prologue: openaiProtocol.ResponsePrologue = {
-            status: "Ok",
-            jobId,
-          };
-
-          console.debug("Writing prologue...", prologue);
-          await writeCbor(stream, prologue);
-
-          let usage;
-          const chunks = [];
-
-          for await (const chunk of response) {
-            chunks.push(chunk);
-            if (chunk.usage) usage = chunk.usage;
-
-            console.debug("Writing chunk...", chunk);
-            await writeCbor(
-              stream,
-              chunk satisfies openaiProtocol.CompletionsStreamChunk
-            );
-          }
-
-          assert(usage);
-
-          const balanceDelta = openaiProtocol.calcCost(
-            offer.protocolPayload,
-            usage
-          );
-
-          const epilogue: openaiProtocol.CompletionsStreamChunk = {
-            object: "derouter.epilogue",
-            jobId,
-            balanceDelta,
-          };
-
-          console.debug("Writing epilogue...", epilogue);
-          await writeCbor(stream, epilogue);
-
-          console.info(
-            `Request complete ($POL ~${parseWeiToEth(balanceDelta)})!`
-          );
-        } else {
-          const prologue: openaiProtocol.ResponsePrologue = {
-            status: "Ok",
-            jobId: "42",
-          };
-
-          console.debug("Writing prologue...", prologue);
-          await writeCbor(stream, prologue);
-
-          let response;
-
-          try {
-            console.debug("Making an OpenAI request...");
-
-            response = await new OpenAI({
-              baseURL: config.openai_base_url,
-              apiKey: config.openai_api_key ?? "",
-            }).completions.create({
-              ...body,
-              stream: false,
-            });
-          } catch (e: any) {
-            console.error("Unhandled OpenAI error", e);
-
-            await writeCbor(stream, {
-              status: "ServiceError",
-              message: "Internal Server Error",
-            } satisfies openaiProtocol.ResponsePrologue);
-
-            continue connectionLoop;
-          }
-
-          console.debug("Writing response...", response);
-          await writeCbor(
-            stream,
-            response satisfies openaiProtocol.CompletionsResponse
-          );
-
-          assert(response.usage);
-
-          const balanceDelta = openaiProtocol.calcCost(
-            offer.protocolPayload,
-            response.usage
-          );
-
-          const epilogue: openaiProtocol.NonStreamingResponseEpilogue = {
-            jobId,
-            balanceDelta,
-          };
-
-          console.debug("Writing epilogue...", epilogue);
-          await writeCbor(stream, epilogue);
-
-          console.info(
-            `Request complete ($POL ~${parseWeiToEth(balanceDelta)})!`
-          );
+          console.debug("Writing chunk...", chunk);
+          await writeCbor(stream, chunk);
         }
+
+        assert(usage);
+
+        const public_payload = JSON.stringify(
+          "prompt" in body
+            ? ({
+                request: {
+                  ...pick(body, [
+                    "model",
+                    "frequency_penalty",
+                    "max_tokens",
+                    "n",
+                    "presence_penalty",
+                    "stream",
+                    "temperature",
+                    "top_p",
+                  ]),
+                },
+
+                response: { usage },
+              } satisfies openai.completions.PublicJobPayload)
+            : ({
+                request: {
+                  ...pick(body, [
+                    "model",
+                    "store",
+                    "reasoning_effort",
+                    "frequency_penalty",
+                    "max_tokens",
+                    "max_completion_tokens",
+                    "n",
+                    "presence_penalty",
+                    "response_format",
+                    "stream",
+                    "temperature",
+                    "top_p",
+                  ]),
+                },
+
+                response: { usage },
+              } satisfies openai.chatCompletions.PublicJobPayload)
+        );
+
+        const balance_delta = openai.calcCost(offer.protocolPayload, usage);
+
+        const { completed_at_sync } = await this.completeJob({
+          database_job_id,
+          balance_delta,
+          public_payload,
+          private_payload: JSON.stringify({ request, response: chunks }),
+        });
+
+        const epilogue =
+          "prompt" in body
+            ? ({
+                object: "derouter.epilogue",
+                balance_delta,
+                public_payload,
+                completed_at_sync,
+              } satisfies openai.completions.EpilogueChunk)
+            : ({
+                object: "derouter.epilogue",
+                balance_delta,
+                public_payload,
+                completed_at_sync,
+              } satisfies openai.chatCompletions.EpilogueChunk);
+
+        console.debug("Writing epilogue...", epilogue);
+        await writeCbor(stream, epilogue);
+
+        console.info(
+          `Request complete ($POL ~${parseWeiToEth(balance_delta)})!`
+        );
       } else {
-        const bodyParseResult = v.safeParse(
-          openaiProtocol.chatCompletions.RequestBodySchema,
-          request
-        );
+        const prologue: openai.ResponsePrologue = {
+          status: "Ok",
+          provider_job_id,
+          created_at_sync,
+        };
 
-        if (!bodyParseResult.success) {
-          console.warn(
-            "Invalid OpenAI Request Body",
-            v.flatten(bodyParseResult.issues)
-          );
+        console.debug("Writing prologue...", prologue);
+        await writeCbor(stream, prologue);
 
-          await writeCbor(stream, {
-            status: "ProtocolViolation",
-            message: "Invalid OpenAI Request Body",
-          } satisfies openaiProtocol.ResponsePrologue);
+        let response;
 
-          break connectionLoop;
-        }
+        try {
+          console.debug("Making OpenAI request...", {
+            ...body,
+            stream: false,
+          });
 
-        const body = bodyParseResult.output;
+          response =
+            "prompt" in body
+              ? ((await openAiClient.completions.create({
+                  ...body,
+                  stream: false,
+                })) satisfies openai.completions.Response)
+              : ((await openAiClient.chat.completions.create({
+                  ...body,
+                  stream: false,
+                })) satisfies openai.chatCompletions.Response);
+        } catch (e: any) {
+          console.error("OpenAI error", e);
 
-        if (body.model !== offer.protocolPayload.model_id) {
-          console.warn("Model ID Mismatch", {
-            expected: offer.protocolPayload.model_id,
-            received: body.model,
+          await this.failJob({
+            database_job_id,
+            reason: e.message,
+            reason_class: FailureReason.OpenAIError,
           });
 
           await writeCbor(stream, {
-            status: "ProtocolViolation",
-            message: "Model ID Mismatch",
-          } satisfies openaiProtocol.ResponsePrologue);
+            status: "ServiceError",
+            message: "Internal Server Error",
+          } satisfies openai.ResponsePrologue);
 
-          break connectionLoop;
+          continue connectionLoop;
         }
 
-        if (body.stream) {
-          let response;
+        console.debug("Writing response...", response);
+        await writeCbor(stream, response);
 
-          try {
-            console.debug("Making an OpenAI request...");
+        assert(response.usage);
 
-            response = await new OpenAI({
-              baseURL: config.openai_base_url,
-              apiKey: config.openai_api_key ?? "",
-            }).chat.completions.create({
-              ...body,
-              stream: true,
-              stream_options: {
-                include_usage: true,
-              },
-            });
-          } catch (e: any) {
-            console.error("Unhandled OpenAI error", e);
+        const public_payload = JSON.stringify(
+          "prompt" in body
+            ? ({
+                request: {
+                  ...pick(body, [
+                    "model",
+                    "frequency_penalty",
+                    "max_tokens",
+                    "n",
+                    "presence_penalty",
+                    "stream",
+                    "temperature",
+                    "top_p",
+                  ]),
+                },
 
-            await writeCbor(stream, {
-              status: "ServiceError",
-              message: "Internal Server Error",
-            } satisfies openaiProtocol.ResponsePrologue);
+                response: { usage: response.usage },
+              } satisfies openai.completions.PublicJobPayload)
+            : ({
+                request: {
+                  ...pick(body, [
+                    "model",
+                    "store",
+                    "reasoning_effort",
+                    "frequency_penalty",
+                    "max_tokens",
+                    "max_completion_tokens",
+                    "n",
+                    "presence_penalty",
+                    "response_format",
+                    "stream",
+                    "temperature",
+                    "top_p",
+                  ]),
+                },
 
-            continue connectionLoop;
-          }
+                response: { usage: response.usage },
+              } satisfies openai.chatCompletions.PublicJobPayload)
+        );
 
-          const prologue: openaiProtocol.ResponsePrologue = {
-            status: "Ok",
-            jobId,
-          };
+        const balance_delta = openai.calcCost(
+          offer.protocolPayload,
+          response.usage
+        );
 
-          console.debug("Writing prologue...", prologue);
-          await writeCbor(stream, prologue);
+        console.debug("this.completeJob()...", {
+          database_job_id,
+          public_payload,
+          balance_delta,
+          private_payload: JSON.stringify({ request, response }),
+        });
 
-          let usage;
-          const chunks = [];
+        const { completed_at_sync } = await this.completeJob({
+          database_job_id,
+          public_payload,
+          balance_delta,
+          private_payload: JSON.stringify({ request, response }),
+        });
 
-          console.debug("Iterating chunks...");
-          for await (const chunk of response) {
-            chunks.push(chunk);
-            if (chunk.usage) usage = chunk.usage;
+        const epilogue =
+          "prompt" in body
+            ? ({
+                public_payload,
+                balance_delta,
+                completed_at_sync,
+              } satisfies openai.completions.Epilogue)
+            : ({
+                public_payload,
+                balance_delta,
+                completed_at_sync,
+              } satisfies openai.chatCompletions.Epilogue);
 
-            console.debug("Writing chunk...", chunk);
-            await writeCbor(
-              stream,
-              chunk satisfies openaiProtocol.ChatCompletionsStreamChunk
-            );
-          }
+        console.debug("Writing epilogue...", epilogue);
+        await writeCbor(stream, epilogue);
 
-          assert(usage);
-
-          const balanceDelta = openaiProtocol.calcCost(
-            offer.protocolPayload,
-            usage
-          );
-
-          const epilogue: openaiProtocol.ChatCompletionsStreamChunk = {
-            object: "derouter.epilogue",
-            jobId,
-            balanceDelta,
-          };
-
-          console.debug("Writing epilogue...", epilogue);
-          await writeCbor(stream, epilogue);
-
-          console.info(
-            `Request complete ($POL ~${parseWeiToEth(balanceDelta)})!`
-          );
-        } else {
-          const prologue: openaiProtocol.ResponsePrologue = {
-            status: "Ok",
-            jobId,
-          };
-
-          console.debug("Writing prologue...", prologue);
-          await writeCbor(stream, prologue);
-
-          let response;
-
-          try {
-            console.debug("Making an OpenAI request...");
-
-            response = await new OpenAI({
-              baseURL: config.openai_base_url,
-              apiKey: config.openai_api_key ?? "",
-            }).chat.completions.create({
-              ...body,
-              stream: false,
-            });
-          } catch (e: any) {
-            console.error("Unhandled OpenAI error", e);
-
-            await writeCbor(stream, {
-              status: "ServiceError",
-              message: "Internal Server Error",
-            } satisfies openaiProtocol.ResponsePrologue);
-
-            continue connectionLoop;
-          }
-
-          console.debug("Writing response...", response);
-
-          await writeCbor(
-            stream,
-            response satisfies openaiProtocol.ChatCompletionsResponse
-          );
-
-          assert(response.usage);
-
-          const balanceDelta = openaiProtocol.calcCost(
-            offer.protocolPayload,
-            response.usage
-          );
-
-          const epilogue: openaiProtocol.NonStreamingResponseEpilogue = {
-            jobId,
-            balanceDelta,
-          };
-
-          console.debug("Writing epilogue...", epilogue);
-          await writeCbor(stream, epilogue);
-
-          console.info(
-            `Request complete ($POL ~${parseWeiToEth(balanceDelta)})!`
-          );
-        }
+        console.info(
+          `Request complete ($POL ~${parseWeiToEth(balance_delta)})!`
+        );
       }
     }
 
@@ -434,7 +456,7 @@ new OpenAiProxyProvider(
       Object.entries(config.offers).map(([offerId, offer]) => [
         offerId,
         {
-          protocol: openaiProtocol.ProtocolId,
+          protocol: openai.ProtocolId,
           protocol_payload: offer,
         },
       ])
