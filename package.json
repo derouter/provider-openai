@@ -35,7 +35,7 @@
   },
   "dependencies": {
     "@derouter/protocol-openai": "file:../protocol-openai",
-    "@derouter/provider": "file:../provider",
+    "@derouter/rpc": "file:../rpc-js",
     "@ethersproject/bignumber": "^5.8.0",
     "json5": "^2.2.3",
     "openai": "^4.89.1",

@@ -1,6 +1,6 @@
 import * as openai from "@derouter/protocol-openai";
-import { Provider } from "@derouter/provider";
-import { readCborOnce, writeCbor } from "@derouter/provider/util";
+import { Auth, RPC } from "@derouter/rpc";
+import { readCborOnce, writeCbor } from "@derouter/rpc/util";
 import json5 from "json5";
 import assert from "node:assert";
 import * as fs from "node:fs";
@@ -88,18 +88,39 @@ if (!configParseResult.success) {
 const config = configParseResult.output;
 console.dir(config, { depth: null, colors: true });
 
-class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
-  async onConnection(
-    customerPeerId: string,
-    offer: {
-      protocolId: string;
-      offerId: string;
-      protocolPayload: openai.OfferPayload;
-    },
-    connectionId: number,
-    stream: Duplex
-  ): Promise<void> {
-    console.debug("onConnection", { customerPeerId, offer, connectionId });
+class OpenAiProxyProvider {
+  private readonly _rpc: RPC;
+
+  constructor(readonly config: v.InferOutput<typeof ConfigSchema>) {
+    this._rpc = new RPC(config.rpc_host, config.rpc_port, Auth.Provider);
+
+    this._rpc.emitter.on("providerOpenConnection", (event) =>
+      this.onConnection(event)
+    );
+
+    this._rpc.providerConfig({
+      provider_id: "@derouter/provider-openai_proxy@0.1.0",
+      offers: Object.fromEntries(
+        Object.entries(config.offers).map(([offerId, offer]) => [
+          offerId,
+          {
+            protocol: openai.ProtocolId,
+            protocol_payload: offer satisfies openai.OfferPayload,
+          },
+        ])
+      ),
+    });
+  }
+
+  async onConnection(data: {
+    customer_peer_id: string;
+    protocol_id: string;
+    offer_id: string;
+    protocol_payload: any;
+    connection_id: number;
+    stream: Duplex;
+  }): Promise<void> {
+    console.debug("onConnection", data);
 
     const openAiClient = new OpenAI({
       baseURL: config.openai_base_url,
@@ -111,7 +132,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
 
       const request = await readCborOnce<
         openai.completions.RequestBody | openai.chatCompletions.RequestBody
-      >(stream);
+      >(data.stream);
 
       if (!request) {
         console.debug("Empty request, breaking connection loop");
@@ -119,8 +140,8 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
       }
 
       const { database_job_id, provider_job_id, created_at_sync } =
-        await this.createJob({
-          connection_id: connectionId,
+        await this._rpc.providerCreateJob({
+          connection_id: data.connection_id,
           private_payload: JSON.stringify({ request }),
         });
 
@@ -137,13 +158,13 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
           v.flatten(bodyParseResult.issues)
         );
 
-        await this.failJob({
+        await this._rpc.providerFailJob({
           database_job_id: database_job_id,
           reason: JSON.stringify(v.flatten(bodyParseResult.issues)),
           reason_class: FailureReason.ProtocolRequestBody,
         });
 
-        await writeCbor(stream, {
+        await writeCbor(data.stream, {
           status: "ProtocolViolation",
           message: "Invalid OpenAI Request Body",
         } satisfies openai.ResponsePrologue);
@@ -153,22 +174,22 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
 
       const body = bodyParseResult.output;
 
-      if (body.model !== offer.protocolPayload.model_id) {
+      if (body.model !== data.protocol_payload.model_id) {
         console.warn("Model ID Mismatch", {
-          expected: offer.protocolPayload.model_id,
+          expected: data.protocol_payload.model_id,
           received: body.model,
         });
 
-        await this.failJob({
+        await this._rpc.providerFailJob({
           database_job_id: database_job_id,
           reason: JSON.stringify({
-            expected: offer.protocolPayload.model_id,
+            expected: data.protocol_payload.model_id,
             received: body.model,
           }),
           reason_class: FailureReason.ProtocolModelId,
         });
 
-        await writeCbor(stream, {
+        await writeCbor(data.stream, {
           status: "ProtocolViolation",
           message: "Model ID Mismatch",
         } satisfies openai.ResponsePrologue);
@@ -207,13 +228,13 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
         } catch (e: any) {
           console.error("OpenAI error", e);
 
-          await this.failJob({
+          await this._rpc.providerFailJob({
             database_job_id: database_job_id,
             reason: e.message,
             reason_class: FailureReason.OpenAIError,
           });
 
-          await writeCbor(stream, {
+          await writeCbor(data.stream, {
             status: "ServiceError",
             message: "Internal Server Error",
           } satisfies openai.ResponsePrologue);
@@ -228,7 +249,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
         };
 
         console.debug("Writing prologue...", prologue);
-        await writeCbor(stream, prologue);
+        await writeCbor(data.stream, prologue);
 
         let usage;
         const chunks = [];
@@ -239,7 +260,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
           if (chunk.usage) usage = chunk.usage;
 
           console.debug("Writing chunk...", chunk);
-          await writeCbor(stream, chunk);
+          await writeCbor(data.stream, chunk);
         }
 
         assert(usage);
@@ -284,9 +305,9 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
               } satisfies openai.chatCompletions.PublicJobPayload)
         );
 
-        const balance_delta = openai.calcCost(offer.protocolPayload, usage);
+        const balance_delta = openai.calcCost(data.protocol_payload, usage);
 
-        const { completed_at_sync } = await this.completeJob({
+        const { completed_at_sync } = await this._rpc.providerCompleteJob({
           database_job_id,
           balance_delta,
           public_payload,
@@ -309,7 +330,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
               } satisfies openai.chatCompletions.EpilogueChunk);
 
         console.debug("Writing epilogue...", epilogue);
-        await writeCbor(stream, epilogue);
+        await writeCbor(data.stream, epilogue);
 
         console.info(
           `Request complete ($POL ~${parseWeiToEth(balance_delta)})!`
@@ -322,7 +343,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
         };
 
         console.debug("Writing prologue...", prologue);
-        await writeCbor(stream, prologue);
+        await writeCbor(data.stream, prologue);
 
         let response;
 
@@ -345,13 +366,13 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
         } catch (e: any) {
           console.error("OpenAI error", e);
 
-          await this.failJob({
+          await this._rpc.providerFailJob({
             database_job_id,
             reason: e.message,
             reason_class: FailureReason.OpenAIError,
           });
 
-          await writeCbor(stream, {
+          await writeCbor(data.stream, {
             status: "ServiceError",
             message: "Internal Server Error",
           } satisfies openai.ResponsePrologue);
@@ -360,7 +381,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
         }
 
         console.debug("Writing response...", response);
-        await writeCbor(stream, response);
+        await writeCbor(data.stream, response);
 
         assert(response.usage);
 
@@ -405,7 +426,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
         );
 
         const balance_delta = openai.calcCost(
-          offer.protocolPayload,
+          data.protocol_payload,
           response.usage
         );
 
@@ -416,7 +437,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
           private_payload: JSON.stringify({ request, response }),
         });
 
-        const { completed_at_sync } = await this.completeJob({
+        const { completed_at_sync } = await this._rpc.providerCompleteJob({
           database_job_id,
           public_payload,
           balance_delta,
@@ -437,7 +458,7 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
               } satisfies openai.chatCompletions.Epilogue);
 
         console.debug("Writing epilogue...", epilogue);
-        await writeCbor(stream, epilogue);
+        await writeCbor(data.stream, epilogue);
 
         console.info(
           `Request complete ($POL ~${parseWeiToEth(balance_delta)})!`
@@ -445,23 +466,8 @@ class OpenAiProxyProvider extends Provider<openai.OfferPayload> {
       }
     }
 
-    console.debug("Dropped connection", connectionId);
+    console.debug("Dropped connection", data.connection_id);
   }
 }
 
-new OpenAiProxyProvider(
-  {
-    provider_id: "@derouter/provider-openai_proxy@0.1.0",
-    offers: Object.fromEntries(
-      Object.entries(config.offers).map(([offerId, offer]) => [
-        offerId,
-        {
-          protocol: openai.ProtocolId,
-          protocol_payload: offer,
-        },
-      ])
-    ),
-  },
-  config.rpc_host,
-  config.rpc_port
-).loop();
+new OpenAiProxyProvider(config);
