@@ -1,5 +1,5 @@
 import * as openai from "@derouter/protocol-openai";
-import { Auth, RPC } from "@derouter/rpc";
+import { RPC } from "@derouter/rpc";
 import { readCborOnce, writeCbor } from "@derouter/rpc/util";
 import json5 from "json5";
 import assert from "node:assert";
@@ -92,24 +92,28 @@ class OpenAiProxyProvider {
   private readonly _rpc: RPC;
 
   constructor(readonly config: v.InferOutput<typeof ConfigSchema>) {
-    this._rpc = new RPC(config.rpc_host, config.rpc_port, Auth.Provider);
+    this._rpc = new RPC(config.rpc_host, config.rpc_port);
 
     this._rpc.emitter.on("providerOpenConnection", (event) =>
       this.onConnection(event)
     );
 
-    this._rpc.providerConfig({
-      provider_id: "@derouter/provider-openai_proxy@0.1.0",
-      offers: Object.fromEntries(
-        Object.entries(config.offers).map(([offerId, offer]) => [
-          offerId,
-          {
-            protocol: openai.ProtocolId,
-            protocol_payload: offer satisfies openai.OfferPayload,
-          },
-        ])
-      ),
-    });
+    this.init();
+  }
+
+  async init() {
+    for (const [offerId, offer] of Object.entries(this.config.offers)) {
+      const payload = {
+        offer_id: offerId,
+        protocol_id: openai.ProtocolId,
+        protocol_payload: offer satisfies openai.OfferPayload,
+      };
+
+      console.debug("Providing", payload);
+      await this._rpc.providerProvideOffer(payload);
+    }
+
+    console.info("✅ Provider initialized");
   }
 
   async onConnection(data: {
