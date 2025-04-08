@@ -106,7 +106,7 @@ class OpenAiProxyProvider {
       const payload = {
         offer_id: offerId,
         protocol_id: openai.ProtocolId,
-        protocol_payload: offer satisfies openai.OfferPayload,
+        protocol_payload: JSON.stringify(offer satisfies openai.OfferPayload),
       };
 
       console.debug("Providing", payload);
@@ -120,11 +120,22 @@ class OpenAiProxyProvider {
     customer_peer_id: string;
     protocol_id: string;
     offer_id: string;
-    protocol_payload: any;
+    protocol_payload: string;
     connection_id: number;
     stream: Duplex;
   }): Promise<void> {
-    console.debug("onConnection", data);
+    const protocol_payload = v.parse(
+      openai.OfferPayloadSchema,
+      JSON.parse(data.protocol_payload)
+    );
+
+    console.debug("onConnection", {
+      customer_peer_id: data.customer_peer_id,
+      protocol_id: data.protocol_id,
+      offer_id: data.offer_id,
+      protocol_payload,
+      connection_id: data.connection_id,
+    });
 
     const openAiClient = new OpenAI({
       baseURL: config.openai_base_url,
@@ -178,16 +189,16 @@ class OpenAiProxyProvider {
 
       const body = bodyParseResult.output;
 
-      if (body.model !== data.protocol_payload.model_id) {
+      if (body.model !== protocol_payload.model_id) {
         console.warn("Model ID Mismatch", {
-          expected: data.protocol_payload.model_id,
+          expected: protocol_payload.model_id,
           received: body.model,
         });
 
         await this._rpc.providerFailJob({
           database_job_id: database_job_id,
           reason: JSON.stringify({
-            expected: data.protocol_payload.model_id,
+            expected: protocol_payload.model_id,
             received: body.model,
           }),
           reason_class: FailureReason.ProtocolModelId,
@@ -309,7 +320,7 @@ class OpenAiProxyProvider {
               } satisfies openai.chatCompletions.PublicJobPayload)
         );
 
-        const balance_delta = openai.calcCost(data.protocol_payload, usage);
+        const balance_delta = openai.calcCost(protocol_payload, usage);
 
         const { completed_at_sync } = await this._rpc.providerCompleteJob({
           database_job_id,
@@ -429,10 +440,7 @@ class OpenAiProxyProvider {
               } satisfies openai.chatCompletions.PublicJobPayload)
         );
 
-        const balance_delta = openai.calcCost(
-          data.protocol_payload,
-          response.usage
-        );
+        const balance_delta = openai.calcCost(protocol_payload, response.usage);
 
         console.debug("this.completeJob()...", {
           database_job_id,
