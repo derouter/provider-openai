@@ -37,8 +37,10 @@
     "@derouter/protocol-openai": "file:../protocol-openai",
     "@derouter/rpc": "file:../rpc-js",
     "@ethersproject/bignumber": "^5.8.0",
+    "drizzle-orm": "^0.41.0",
     "json5": "^2.2.3",
     "openai": "^4.89.1",
+    "rereadable-stream": "^1.4.14",
     "valibot": "^1.0.0"
   }
 }

@@ -73,3 +73,38 @@ export function formatEther(value: bignumber.BigNumber): string {
 export function parseWeiToEth(value: string): number {
   return parseFloat(formatEther(bignumber.BigNumber.from(value)));
 }
+
+/**
+ * Returns a new object with entries sorted by key.
+ */
+export function sortByKey<T extends { [key: string]: any }>(
+  obj: T,
+  compareFn?: (a: string, b: string) => number
+): T {
+  return Object.keys(obj)
+    .sort(compareFn)
+    .reduce((acc, key) => {
+      (acc as any)[key] = obj[key];
+      return acc;
+    }, {} as T);
+}
+
+export function safeTry<T>(
+  fn: () => T
+): { success: true; output: T } | { success: false; error: any } {
+  try {
+    return { success: true, output: fn() };
+  } catch (e) {
+    return { success: false, error: e };
+  }
+}
+
+export async function safeTryAsync<T>(
+  fn: () => Promise<T>
+): Promise<{ success: true; output: T } | { success: false; error: any }> {
+  try {
+    return { success: true, output: await fn() };
+  } catch (e) {
+    return { success: false, error: e };
+  }
+}
