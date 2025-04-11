@@ -31,7 +31,6 @@ export const ConfigSchema = v.object({
       description: v.optional(v.string()),
       input_token_price: PriceSchema,
       output_token_price: PriceSchema,
-      trial: v.optional(PriceSchema),
     })
   ),
 });
