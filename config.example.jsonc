@@ -1,0 +1,32 @@
+{
+  // DeRouter node RPC settings.
+  "rpc_host": "127.0.0.1", // Default value.
+  "rpc_port": 4269, // Default value.
+
+  // Requests are proxied to this endpoint.
+  "openai_base_url": "http://127.0.0.1:11434/v1", // Not set by default.
+  // "openai_api_key": "", // Not set by default.
+
+  // We need to store some data locally.
+  "database_url": "./db.local.sqlite",
+
+  // Provided offers.
+  "offers": {
+    // Name of the offer.
+    "kunoichi-8k": {
+      "model_id": "kunoichi",
+      "context_size": 8192,
+      "description": "Kunoichi, a great Roleplaying 8B model",
+
+      // Per 1M tokens.
+      "input_token_price": {
+        "$pol": "10" // 10 ether.
+      },
+
+      // Per 1M tokens.
+      "output_token_price": {
+        "$pol": "5" // 5 ether.
+      }
+    }
+  }
+}
