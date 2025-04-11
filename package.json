@@ -34,8 +34,8 @@
     "typescript": "^5.8.2"
   },
   "dependencies": {
-    "@derouter/protocol-openai": "file:../protocol-openai",
-    "@derouter/rpc": "file:../rpc-js",
+    "@derouter/protocol-openai": "^0.1.0",
+    "@derouter/rpc": "^0.1.0",
     "@ethersproject/bignumber": "^5.8.0",
     "drizzle-orm": "^0.41.0",
     "json5": "^2.2.3",
