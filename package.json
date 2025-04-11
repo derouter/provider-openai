@@ -1,5 +1,5 @@
 {
-  "name": "@derouter/provider-openai_proxy",
+  "name": "@derouter/provider-openai",
   "version": "0.1.0",
   "description": "A simple OpenAI proxy provider for DeRouter protocol",
   "main": "dist/index.js",
@@ -16,7 +16,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/derouter/provider-openai_proxy.git"
+    "url": "git+https://github.com/derouter/provider-openai.git"
   },
   "keywords": [
     "derouter",
@@ -25,9 +25,9 @@
   "author": "derouter.org",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/derouter/provider-openai_proxy/issues"
+    "url": "https://github.com/derouter/provider-openai/issues"
   },
-  "homepage": "https://github.com/derouter/provider-openai_proxy#readme",
+  "homepage": "https://github.com/derouter/provider-openai#readme",
   "devDependencies": {
     "@types/node": "^22.13.11",
     "nodemon": "^3.1.9",

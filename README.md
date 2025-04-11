@@ -1,4 +1,6 @@
-# @derouter/provider-openai_proxy
+# DeRouter OpenAI Provider
+
+A [DeRouter](https://derouter.org) Provider module which proxies OpenAI-compatible requests to an OpenAI-compatible endpoint.
 
 ## Development
 
